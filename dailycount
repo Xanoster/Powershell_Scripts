@@ -1,0 +1,643 @@
+Param(
+    [Parameter(Mandatory = $true)]
+    [string]$environmentName
+)
+
+# Ensure the SQLServer module is installed and imported
+if (-not (Get-Module -ListAvailable -Name SqlServer)) {
+    Install-Module -Name SqlServer -Scope CurrentUser -AllowClobber -Force
+}
+Import-Module SqlServer
+
+
+# Providing the location of the script
+$FilesLocation = $PSScriptRoot
+
+# Ensure the log directory exists
+if (-not (Test-Path "$FilesLocation\Logs")) {
+    New-Item -Path "$FilesLocation\Logs" -ItemType Directory | Out-Null
+}
+
+Start-Transcript -Path "$FilesLocation\Logs\$environmentName.log" -ErrorAction Ignore
+
+# Define MySQL connection strings based on environment
+switch ($environmentName) {
+    'dev' {
+        $mysqlconnection = 'server=usohcm-d-edm-01.baincapital.com;database=edm;user id=capitalmarketsadmin;pwd=FGvdsa76%$f!#@yd;SslMode=Preferred;'
+        $csvFilePath = "$FilesLocation\DataFiles\$environmentName\$environmentName.csv"
+        $instanceName = 'usbocmdsql01'
+        Write-Host "$(Get-Date -f s): $environmentName selection made"
+        $mysqlquery = Get-Content "$FilesLocation\Query\MySQLQuerydev.txt" | Out-String
+        Write-Host "$(Get-Date -f s): $mysqlquery"
+        $subject = "DEV : GVA MultiAGAMaster Daily Count - $(Get-Date -f d)"
+        $query = Get-Content "$FilesLocation\Query\Query.txt" | Out-String
+        $PipeName = "GVA MultiAGAMaster Parallel"
+        $mastermysqlquery = Get-Content "$FilesLocation\Query\MasterPipeiddev.txt" | Out-String
+        $mastermysqlquery_old = Get-Content "$FilesLocation\Query\MasterPipeiddev2.txt" | Out-String
+        $PercentValue = 10
+    }
+    'prod' {
+        $mysqlconnection = 'server=usohcm-p-edm-01;database=edm;user id=cmadmin;pwd=JJfbn9sYQNQyP6qD;SslMode=Preferred;'
+        $csvFilePath = "$FilesLocation\DataFiles\$environmentName\$environmentName.csv"
+        $instanceName = 'USBOSAPSQL16'
+        write-host "$(Get-Date -f s): $environmentName selection made"
+        $mysqlquery = get-content $FilesLocation\Query\MySQLQueryprod.txt | Out-String
+        write-host "$(Get-Date -f s): $mysqlquery"
+        $subject = "PROD : GVA MultiAGAMaster Daily Count - $(Get-Date -f d)"
+        $query = get-content $FilesLocation\Query\QueryPROD.txt | Out-String
+        $PipeName = "GVA_MultiAGAMaster_Parallel"
+        $mastermysqlquery = get-content $FilesLocation\Query\MasterPipeidprod.txt | Out-String
+        $mastermysqlquery_old = get-content $FilesLocation\Query\MasterPipeidprod2.txt | Out-String
+        $PercentValue = 10
+    }
+    '2Years' {
+
+        $mysqlconnection = 'server=usohcm-p-edm-01;database=edm;user id=cmadmin;pwd=JJfbn9sYQNQyP6qD;SslMode=Preferred;'
+        $csvFilePath = "$FilesLocation\DataFiles\$environmentName\$environmentName.csv"
+        $instanceName = 'USBOSAPSQL16'
+        write-host "$(Get-Date -f s): $environmentName selection made"
+        $mysqlquery = get-content $FilesLocation\Query\MySQLQuery2YEARSMaster.txt | Out-String
+        write-host "$(Get-Date -f s): $mysqlquery"
+        $subject = "PROD : MultiAGAMaster_2YearRefresh Daily Count - $(Get-Date -f d)"
+        $query = get-content $FilesLocation\Query\Query2YEARSMaster.txt | Out-String
+        $PipeName = "GVA MultiAGAMaster_2YearRefresh_Parallel"
+        $mastermysqlquery = get-content $FilesLocation\Query\MasterPipeid2Years.txt | Out-String
+        $mastermysqlquery_old = get-content $FilesLocation\Query\MasterPipeid2Years2.txt | Out-String
+        $PercentValue = 10
+    }
+    'qa' {
+
+        $mysqlconnection = 'server=usohcm-d-edm-01.baincapital.com;database=edm;user id=capitalmarketsadmin;pwd=FGvdsa76%$f!#@yd;SslMode=Preferred;'
+        $csvFilePath = "$FilesLocation\DataFiles\$environmentName\$environmentName.csv"
+        $instanceName = 'usbocmdsql02'
+        write-host "$(Get-Date -f s): $environmentName selection made"
+        $mysqlquery = get-content $FilesLocation\Query\MySQLQueryqa.txt | Out-String
+        write-host "$(Get-Date -f s): $mysqlquery"
+        $subject = "QA: MultiAGAMaster Daily Count - $(Get-Date -f d)"
+        $query = get-content $FilesLocation\Query\QueryQA.txt | Out-String
+        $PipeName = "MultiAGAMaster_QA_Parallel"
+        $mastermysqlquery = get-content $FilesLocation\Query\MasterPipeidqa.txt | Out-String
+        $mastermysqlquery_old = get-content $FilesLocation\Query\MasterPipeidqa2.txt | Out-String
+        $PercentValue = 10
+    }
+    default {
+        $mysqlconnection = 'server=USOHCMDAPP01.bainnonprod.com;database=edm;user id=root;pwd=root@123;SslMode=Preferred;'
+    }
+}
+
+# Remove the previous Excel file to avoid failures
+$excelFilePath = "$FilesLocation\DataFiles\$environmentName\DailyCount.xls"
+if (Test-Path $excelFilePath) {
+    try {
+        Remove-Item -Path $excelFilePath -ErrorAction Stop
+        Write-Host "$(Get-Date -f s): Successfully removed previous Excel file."
+    }
+    catch {
+        Write-Host "$(Get-Date -f s): Failed to remove previous Excel file. Error: $_"
+    }
+}
+
+# Bypass SSL certificate validation
+[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+Write-Host "$(Get-Date -f s): Executing query against server: $instanceName"
+
+try {
+    $connectionString = "Server=$instanceName;Database=DWStage;Trusted_Connection=True;TrustServerCertificate=True;"
+
+    $results = Invoke-Sqlcmd -Query $query -ConnectionString $connectionString -QueryTimeout 1800 -ErrorAction Stop
+    Write-Host "$(Get-Date -f s): SQL query executed successfully."
+}
+catch {
+    Write-Host "$(Get-Date -f s): Failed to execute SQL query. Error: $_"
+    Stop-Transcript
+    exit 1
+}
+
+if ($results) {
+    Write-Host "$(Get-Date -f s): Result received"
+    
+    # Path of CSV file to be saved
+    $datacsvFilePath = "$FilesLocation\DataFiles\$environmentName\$instanceName.csv"
+    Write-Host "$(Get-Date -f s): $datacsvFilePath is the csv file name"
+    
+    # Output to CSV
+    Write-Host "$(Get-Date -f s): Saving SQL Query Results in CSV format..."
+    $results | Export-Csv $datacsvFilePath -NoTypeInformation
+}
+else {
+    Write-Host "$(Get-Date -f s): No results were returned from the SQL query."
+}
+
+# Set the security protocol explicitly
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Making connection to MySql
+Write-Host "$(Get-Date -f s): Making connection to MySQL using $mysqlconnection"
+
+# Loading MySQL .NET Connector
+try {
+    [void][System.Reflection.Assembly]::LoadFrom("D:\Count Script\bin\MySQL.Data.dll")
+    Write-Host "$(Get-Date -f s): Successfully loaded MySQL .NET Connector."
+}
+catch {
+    Write-Host "$(Get-Date -f s): Failed to load MySQL .NET Connector. Error: $_"
+    Stop-Transcript
+    exit 1
+}
+
+# Create MySQL connection object
+$connection = New-Object MySql.Data.MySqlClient.MySqlConnection
+$connection.ConnectionString = $mysqlconnection
+
+try {
+    $connection.Open()
+    
+    if ($connection.State -eq 'Open') {
+        Write-Host "$(Get-Date -f s): Successfully connected to MySQL server."
+
+        # Flush hosts to unblock the IP
+        Write-Host "$(Get-Date -f s): Unblocking the IP address by running FLUSH HOSTS;"
+        $flushCommand = New-Object MySql.Data.MySqlClient.MySqlCommand
+        $flushCommand.Connection = $connection
+        $flushCommand.CommandText = "FLUSH HOSTS;"
+        $flushCommand.ExecuteNonQuery()
+
+        Write-Host "$(Get-Date -f s): IP address unblocked successfully."
+       
+        # Initialize MySQL command and DataAdapter objects
+        $mysqlcommand = New-Object MySql.Data.MySqlClient.MySqlCommand
+        $mysqlcommandtwo = New-Object MySql.Data.MySqlClient.MySqlCommand
+        $mysqlcommandthree = New-Object MySql.Data.MySqlClient.MySqlCommand
+        $MYSQLDataAdapter = New-Object MySql.Data.MySqlClient.MySqlDataAdapter
+        $MYSQLDataAdapterTwo = New-Object MySql.Data.MySqlClient.MySqlDataAdapter
+        $MYSQLDataAdapterThree = New-Object MySql.Data.MySqlClient.MySqlDataAdapter
+        $MYSQLDataSet = New-Object System.Data.DataSet
+        $MYSQLDataSettwo = New-Object System.Data.DataSet
+        $MYSQLDataSetthree = New-Object System.Data.DataSet
+        
+        # Setting connection for command objects
+        $mysqlcommand.Connection = $connection
+        $mysqlcommandtwo.Connection = $connection
+        $mysqlcommandthree.Connection = $connection
+
+        Write-Host "$(Get-Date -f s): Running query on MySQL to pull individual pipe runtime details"
+        $mysqlcommand.CommandText = $mysqlquery
+        $MYSQLDataAdapter.SelectCommand = $mysqlcommand
+        $NumberOfDataSets = $MYSQLDataAdapter.Fill($MYSQLDataSet, "data")
+
+        Write-Host "$(Get-Date -f s): Saving MySQL Query Results in CSV format..."
+        $MYSQLDataSet.Tables[0] | Export-Csv $csvFilePath -NoTypeInformation
+
+        # Get actual time of sub pipes
+        Write-Host "$(Get-Date -f s): Running query on MySQL again to get master pipe time details"
+        $mysqlcommandtwo.CommandText = $mastermysqlquery
+        $MYSQLDataAdapterTwo.SelectCommand = $mysqlcommandtwo
+        $NumberOfDataSetstwo = $MYSQLDataAdapterTwo.Fill($MYSQLDataSettwo, "data")
+
+        # Storing result in a variable to insert in Excel
+        if ($MYSQLDataSettwo.Tables[0].Rows.Count -gt 0) {
+            $pipiline_runtime = $MYSQLDataSettwo.Tables[0].Rows[0].Item("avg_run_time")
+            Write-Host "Today's run time: $pipiline_runtime"
+        }
+        else {
+            Write-Host "$(Get-Date -f s): No data found for master pipe time details."
+        }
+
+        Write-Host "$(Get-Date -f s): Running query on MySQL again to get master pipe last run time details"
+        $mysqlcommandthree.CommandText = $mastermysqlquery_old
+        $MYSQLDataAdapterThree.SelectCommand = $mysqlcommandthree
+        $NumberOfDataSetsthree = $MYSQLDataAdapterThree.Fill($MYSQLDataSetthree, "data")
+
+        # Storing result in a variable to insert in Excel
+        if ($MYSQLDataSetthree.Tables[0].Rows.Count -gt 0) {
+            $pipiline_runtime_old = $MYSQLDataSetthree.Tables[0].Rows[0].Item("avg_run_time")
+            Write-Host "Last pipe runtime: $pipiline_runtime_old"
+        }
+        else {
+            Write-Host "$(Get-Date -f s): No data found for master pipe last run time details."
+        }
+    }
+    else {
+        Write-Host "$(Get-Date -f s): Connection to MySQL server is not open."
+    }
+}
+catch {
+    Write-Host "$(Get-Date -f s): Failed to connect to MySQL server. Error: $_"
+    Write-Host "$(Get-Date -f s): Inner Exception: $($_.Exception.InnerException.Message)"
+    Write-Host "$(Get-Date -f s): Detailed Error: $($_.Exception.ToString())"
+}
+finally {
+    # Close the connection if it's open
+    if ($connection.State -eq 'Open') {
+        $connection.Close()
+        Write-Host "$(Get-Date -f s): Closed MySQL connection."
+    }
+}
+
+
+# Importing yesterday's daily count file
+$CSV1 = Import-Csv -Path "$FilesLocation\DataFiles\$environmentName\$environmentName.csv" -Delimiter ','
+$CSV2 = Import-Csv -Path "$FilesLocation\DataFiles\$environmentName\$instanceName.csv" -Delimiter ','
+
+$ResultNew = Foreach ($Item1 in $CSV1) {
+    Foreach ($item2 in $CSV2) {
+   
+        If ($Item1.pipeline_name -eq $item2.dataset) {
+            [PSCustomObject]@{
+                Pipe_Name                    = $Item1.pipeline_name
+                #Start_Time = $Item1.startdate
+                #End_Time = $Item1.enddate
+                Count_of_Records             = $Item2.count_records
+                Portfolio_Count              = $Item2.count_portfolio
+                Run_Time                     = $Item1.avg_run_time
+                Count_of_AsofDate            = $Item2.Count_AsofDate
+                Portfolios_count_as_max_date = $Item2.Portfolios_count_as_max_date
+                Missing_Portfolios           = $item2.Missing_Portfolios
+            }
+        }
+    }
+}
+
+#############################################################################
+
+$connectionString = "Server=USBOCMUSQL11;Database=IVPEDM;Trusted_Connection=True;TrustServerCertificate=True;"
+
+# Defining the SQL query to fetch data based on environmentName, asofdate, and max id for each PipeName
+$sqlQuery = @"
+SELECT yrc.*
+FROM YesterdayRecordCounts yrc
+CROSS APPLY (
+    SELECT MAX(id) AS MaxId
+    FROM YesterdayRecordCounts
+    WHERE Pipe_Name = yrc.Pipe_Name
+    AND EnvironmentName = '$environmentName'
+    AND asofdate = CASE 
+                        WHEN DATEPART(WEEKDAY, GETDATE()) = 2 
+                        THEN DATEADD(day, -2, CAST(GETDATE() AS date))
+                        ELSE DATEADD(day, -1, CAST(GETDATE() AS date))
+                    END
+) AS MaxRecords
+WHERE yrc.id = MaxRecords.MaxId
+AND yrc.EnvironmentName = '$environmentName'
+AND yrc.asofdate = CASE 
+                        WHEN DATEPART(WEEKDAY, GETDATE()) = 2 
+                        THEN DATEADD(day, -2, CAST(GETDATE() AS date))
+                        ELSE DATEADD(day, -1, CAST(GETDATE() AS date))
+                    END
+"@
+
+
+
+# Execute the SQL query and fetch results
+try {
+    $results = Invoke-Sqlcmd -Query $sqlQuery -ConnectionString $connectionString -QueryTimeout 1800 -ErrorAction Stop
+    Write-Host "$(Get-Date -f s): SQL query executed successfully."
+    Write-Host "$(Get-Date -f s): Result received:"
+
+    foreach ($row in $results) {
+        $rowData = ""
+        foreach ($property in $row.PSObject.Properties) {
+            $rowData += "$($property.Name): $($property.Value)  "
+        }
+        #Write-Host $rowData
+    }
+
+    $ResultOld = $results | Export-Csv -Path "$FilesLocation\DataFiles\$environmentName\DailyCountOld.csv"   -NoTypeInformation
+}
+catch {
+    Write-Host "$(Get-Date -f s): Failed to execute SQL query. Error: $_"
+    Stop-Transcript
+    exit 1
+}
+
+
+
+#############################################################################
+
+# Merging of ResultOld.csv and Result.csv
+$ResultOld = Import-Csv -Path "$FilesLocation\DataFiles\$environmentName\DailyCountOld.csv" -Delimiter ','
+
+if ($environmentName -eq '2Years') {
+    $test = Foreach ($Item1 in $ResultNew) {
+        Foreach ($item2 in $ResultOld) {
+   
+            If ($Item1.Pipe_Name -eq $item2.Pipe_Name) {
+                [PSCustomObject]@{
+                    Pipe_Name                      = $Item1.Pipe_Name
+                    Count_of_Records_Previous      = $Item2.Count_of_Records
+                    Portfolio_Count_Previous       = $Item2.Portfolio_Count
+                    Run_Time_Previous              = $Item2.Run_Time
+                    Distinct_Period_Check_Previous = $Item2.Count_of_AsofDate
+				
+                    Count_of_Records               = $Item1.Count_of_Records
+                    Portfolio_Count                = $Item1.Portfolio_Count
+                    Run_Time                       = $Item1.Run_Time
+                    Distinct_Period_Check          = $Item1.Count_of_AsofDate
+                    Portfolios_count_as_max_date   = $Item1.Portfolios_count_as_max_date
+                    Missing_Portfolios             = $item1.Missing_Portfolios
+                }
+            }
+        }
+    }
+
+}
+
+else {
+
+    $test = Foreach ($Item1 in $ResultNew) {
+        Foreach ($item2 in $ResultOld) {
+   
+            If ($Item1.Pipe_Name -eq $item2.Pipe_Name) {
+                [PSCustomObject]@{
+                    Pipe_Name                       = $Item1.Pipe_Name
+                    Count_of_Records_Yesterday      = $Item2.Count_of_Records
+                    Portfolio_Count_Yesterday       = $Item2.Portfolio_Count
+                    Run_Time_Yesterday              = $Item2.Run_Time
+                    Distinct_Period_Check_Yesterday = $Item2.Count_of_AsofDate
+				
+                    Count_of_Records_Today          = $Item1.Count_of_Records
+                    Portfolio_Count_Today           = $Item1.Portfolio_Count
+                    Run_Time_Today                  = $Item1.Run_Time
+                    Distinct_Period_Check_Today     = $Item1.Count_of_AsofDate
+                    Portfolios_count_as_max_date    = $Item1.Portfolios_count_as_max_date
+                    Missing_Portfolios              = $item1.Missing_Portfolios
+                }
+            }
+        }
+    }
+}
+
+$test | Export-Csv -Path "$FilesLocation\DataFiles\$environmentName\DailyCount.csv" -NoTypeInformation
+$test1 = "$FilesLocation\DataFiles\$environmentName\DailyCount.csv"
+
+#Converting to excel and formatting
+
+write-host "Converting CSV output to Excel..."
+$excel = New-Object -ComObject excel.application
+$excel.visible = $true
+$excel.displayalerts = $true
+$workbook = $excel.Workbooks.Open($test1)
+$workSheet = $workbook.worksheets.Item(1)
+$resize = $workSheet.UsedRange
+#$resize.EntireColumn.AutoFit() | Out-Null
+$xlExcel8 = 56
+ 
+write-host "Colouring begins..."
+
+$objRange = $workSheet.UsedRange
+$RowCount = $objRange.Rows.Count
+
+for ($i = 2; $i -le $RowCount; $i++) {
+    write-host "In Loop..."
+    write-host $RowCount
+    $TodayRecords = $workSheet.Cells.Item($i, 6).Value()
+    #write-host "TodayRecords = "$TodayRecords
+    $YesterdayRecords = $workSheet.Cells.Item($i, 2).Value()
+    #write-host "YesterdayRecords = "$YesterdayRecords
+    $Diffrenceitem = $TodayRecords - $YesterdayRecords + 1
+    $PercentageDiff = $Diffrenceitem / $TodayRecords * 100;
+    #write-host "PercentageDiff = "$PercentageDiff
+    if (($PercentageDiff -ge $PercentValue) -or ($PercentageDiff -le - $PercentValue)) {
+        $item = $workSheet.Cells.Item($i, 6)
+        $item.Interior.ColorIndex = 3
+    }
+    if ( $workSheet.Cells.Item($i, 3).Value() -gt $workSheet.Cells.Item($i, 7).Value() ) {
+        write-host "In If..."
+        $item = $workSheet.Cells.Item($i, 7)
+        $item.Interior.ColorIndex = 3
+    
+    }
+    elseif ( $workSheet.Cells.Item($i, 3).Value() -lt $workSheet.Cells.Item($i, 7).Value()) {
+        write-host "In ElseIf..."
+        $item = $workSheet.Cells.Item($i, 7)
+        $item.Interior.ColorIndex = 4
+  
+    }
+    if ( $workSheet.Cells.Item($i, 5).Value() -gt $workSheet.Cells.Item($i, 9).Value() ) {
+        write-host "In If..."
+        $item = $workSheet.Cells.Item($i, 9)
+        $item.Interior.ColorIndex = 3
+    
+    }
+    elseif ( $workSheet.Cells.Item($i, 5).Value() -lt $workSheet.Cells.Item($i, 9).Value()) {
+        write-host "In ElseIf..."
+        $item = $workSheet.Cells.Item($i, 9)
+        $item.Interior.ColorIndex = 4
+  
+    }
+}
+write-host "$(Get-Date -f s) Cell merging starts" 
+for ($i = 0; $i -lt 3; $i++) {
+    $eRow = $workSheet.cells.item(1, 1).entireRow
+    $active = $eRow.activate()
+    $active = $eRow.insert($xlShiftDown)
+}
+
+$MergeCells = $workSheet.Range("A1:A3")
+
+$MergeCells.Select()
+$MergeCells.MergeCells = $true
+
+for ($i = 1; $i -le 3; $i++) {
+    $MergeCells = $workSheet.Range("C${i}:E${i}")
+
+    $MergeCells.Select()
+    $MergeCells.MergeCells = $true
+}
+
+for ($i = 1; $i -le 3; $i++) {
+    $MergeCells = $workSheet.Range("F${i}:I${i}")
+
+    $MergeCells.Select()
+    $MergeCells.MergeCells = $true
+}
+write-host "$(Get-Date -f s) Cell merging ends" 
+$a = [datetime](Get-Date -Format "yyyy-MM-dd")
+$Currday = (Get-Date -f "dddd")
+
+#Added condition to handle few days gap between runs during weekend
+
+if ($Currday -eq 'Monday' -and $environmentName -eq 'prod') {
+    $workSheet.Cells.Item(1, 3) = $a.AddDays(-3)              #T-3
+    $workSheet.Cells.Item(2, 3) = $a.AddDays(-2)              #T-2
+}
+
+elseif ($Currday -eq 'Monday' -and $environmentName -ne 'prod') {
+    $workSheet.Cells.Item(1, 3) = $a.AddDays(-4)              #T-4
+    $workSheet.Cells.Item(2, 3) = $a.AddDays(-3)              #T-3 
+}
+
+elseif ($environmentName -eq '2Years') {
+    $workSheet.Cells.Item(1, 3) = $a.AddDays(-9)              #T-9
+    $workSheet.Cells.Item(2, 3) = $a.AddDays(-8)              #T-8 
+}
+
+Else {
+    $workSheet.Cells.Item(1, 3) = $a.AddDays(-2)              #T-2
+    $workSheet.Cells.Item(2, 3) = $a.AddDays(-1)              #T-1
+}
+
+$workSheet.Cells.Item(1, 1) = $PipeName
+#$workSheet.Cells.Item(1,3) = $a.AddDays(-2)              #T-2
+#T-1
+#$workSheet.Cells.Item(2,3) = $a.AddDays(-1)              #T-1
+
+if ($environmentName -eq '2Years') {
+    $workSheet.Cells.Item(1, 6) = $a.AddDays(-2) 
+    $workSheet.Cells.Item(2, 6) = $a.AddDays(-1) 
+}
+else {
+    $workSheet.Cells.Item(1, 6) = $a.AddDays(-1) 
+    $workSheet.Cells.Item(2, 6) = $a  
+}                        #T
+
+$workSheet.Cells.Item(1, 1).Font.Bold = $True
+
+$r = $RowCount + 3
+
+
+write-host "old value: $pipiline_runtime_old"
+write-host "new value: $pipiline_runtime"
+
+$worksheet.Cells.Item(3, 3).Formula = "=INT($pipiline_runtime_old/60)"
+$worksheet.Cells.Item(3, 6).Formula = "=INT($pipiline_runtime/60)"
+
+
+$mins1 = $worksheet.Cells.Item(3, 3).text
+$mins2 = $worksheet.Cells.Item(3, 6).text
+
+$worksheet.Cells.Item(3, 3).Formula = "=MOD($pipiline_runtime_old,60)"
+$worksheet.Cells.Item(3, 6).Formula = "=MOD($pipiline_runtime,60)"
+
+$sec1 = $worksheet.Cells.Item(3, 3).text
+$sec2 = $worksheet.Cells.Item(3, 6).text
+write-host "$(Get-Date -f s) Converting time into min and secs" 
+$worksheet.Cells.Item(3, 3) = $mins1 + " m " + $sec1 + " s"
+$worksheet.Cells.Item(3, 6) = $mins2 + " m " + $sec2 + " s"
+
+
+
+$worksheet.Cells.Item(1, 2) = "Data for"
+$worksheet.Cells.Item(2, 2) = "Pipe running date"
+$worksheet.Cells.Item(3, 2) = "Run Time"
+
+$a1 = 1, 2, 3
+$a2 = 2, 3, 6
+write-host "$(Get-Date -f s) Making headers bold and horizontal aligning" 
+foreach ($i in $a1) {
+    foreach ($j in $a2) {
+        $workSheet.Cells(${i}, ${j}).HorizontalAlignment = -4108
+        $workSheet.Cells.Item(${i}, ${j}).Font.Bold = $True
+    }
+}
+
+for ($i = 1; $i -le 11; $i++) {
+    $workSheet.Cells.Item(4, ${i}).Font.Bold = $True
+}
+
+write-host "$(Get-Date -f s) Center aligning top 3 rows" 
+
+$workSheet.Cells(1, 1).HorizontalAlignment = -4108
+$workSheet.Cells(1, 1).VerticalAlignment = -4108
+
+$lastrow = $RowCount + 3
+write-host "$(Get-Date -f s) Adding borders in the table" 
+$range = $workSheet.Range("A1:K${lastrow}")
+$range.Borders.Weight = 2
+$resize.EntireColumn.AutoFit() | Out-Null #testing
+$workbook.SaveAs($excelFilePath, $xlExcel8)
+$workbook.Close()
+$excel.quit()
+$excel = $null
+
+write-host "$(Get-Date -f s) Colouring Done..."
+write-host "$(Get-Date -f s) Results are saved in Excel file: $excelFilePath" 
+
+write-host "$(Get-Date -f s) Sending mail for $environmentName" 
+$message = "Please find below daily counts for $environmentName"
+$smtpServer = "Smtp.bainnonprod.com"
+$smtpPort = 25
+$emailFrom = "EDMSupportDev@BainCapital.com"
+$emailto = "baincapital-autoalerts@ivp.in"
+#$emailto="hbhardwaj@ivp.in"
+$password = ""
+$smtp = New-Object Net.Mail.SmtpClient($smtpServer)
+$smtp.Port = $smtpPort
+$smtp.Credentials = New-Object System.Net.NetworkCredential($emailFrom, $password);
+$smtp.EnableSsl = $false
+$attachment = New-Object System.Net.Mail.Attachment($excelFilePath)
+$mailMessage = New-Object System.Net.Mail.MailMessage($emailFrom, $emailto, $subject, $message)
+$mailMessage.Attachments.Add($attachment);
+
+Write-Host "$(Get-Date -f s) sending excel as attachment"
+try {
+    $smtp.Send($mailMessage)
+}
+catch {
+    Write-Host "Failed to send email. Error: $_"
+    # Optionally log this error or handle it accordingly
+}
+
+Write-Host "$(Get-Date -f s) Email Sent"
+
+
+##################################
+
+# Defining connection string
+$connectionString = "Server=USBOCMUSQL11;Database=IVPEDM;Trusted_Connection=True;TrustServerCertificate=True;"
+
+# Create and open a new SQL connection
+$conn = New-Object System.Data.SqlClient.SqlConnection
+$conn.ConnectionString = $connectionString
+$conn.Open()
+
+$asofdate = (Get-Date).ToString("yyyy-MM-dd")
+
+# Initialize values part
+$valuesPart = @()
+
+# Loop through each record in $ResultNew and extract values
+foreach ($record in $ResultNew) {
+    $pipeName = if ($record.Pipe_Name) { "'$($record.Pipe_Name)'" } else { "NULL" }
+    $countOfRecords = if ($record.Count_of_Records -ne $null) { $record.Count_of_Records } else { "NULL" }
+    $portfolioCounts = if ($record.Portfolio_Count -ne $null) { $record.Portfolio_Count } else { "NULL" }
+    $runTime = if ($record.Run_Time -ne $null) { $record.Run_Time } else { "NULL" }
+    $countOfAsofDate = if ($record.Count_of_AsofDate -ne $null) { $record.Count_of_AsofDate } else { "NULL" }
+    $portfoliosCountAsMaxDate = if ($record.Portfolios_count_as_max_date -ne $null) { $record.Portfolios_count_as_max_date } else { "NULL" }
+    $missingPortfolios = if ($record.Missing_Portfolios) { "'$($record.Missing_Portfolios)'" } else { "NULL" }
+
+    $valuesPart += "('$environmentname', '$asofdate', $pipeName, $countOfRecords, $portfolioCounts, $runTime, $countOfAsofDate, $portfoliosCountAsMaxDate, $missingPortfolios)"
+}
+
+# Joining valuesPart array with commas to form a complete VALUES string
+$valuesString = $valuesPart -join ", "
+
+
+$insertQuery = "INSERT INTO YesterdayRecordCounts VALUES $valuesString;"
+
+$oldestAllowedDate = (Get-Date).AddDays(-3).ToString("yyyy-MM-dd")
+
+# Define the delete query to remove records older than 3 days
+$deleteQuery = "DELETE FROM YesterdayRecordCounts WHERE AsofDate < '$oldestAllowedDate' AND EnvironmentName = '$environmentname';"
+
+# Creating a command object and execute the delete query
+$command = $conn.CreateCommand()
+$command.CommandText = $deleteQuery
+$command.ExecuteNonQuery()
+
+# Executing the insert query
+$command.CommandText = $insertQuery
+$command.ExecuteNonQuery()
+
+# Clean up
+$conn.Close()
+
+
+$ResultNew | Export-Csv -Path "$FilesLocation\DataFiles\$environmentName\DailyCountOld.csv" -NoTypeInformation
+
+#$KeyPress = [System.Console]::ReadKey()
+
+Write-Host "$(Get-Date -f s): Process completed"
+
+Stop-Transcript
